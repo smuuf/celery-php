@@ -8,6 +8,9 @@ namespace Celery;
  */
 class AsyncResult
 {
+    private const READY_STATES = ['SUCCESS', 'FAILURE', 'REVOKED'];
+    private const UNREADY_STATES = ['PENDING', 'RECEIVED', 'STARTED', 'REJECTED', 'RETRY'];
+
     private $task_id; // string, queue name
     private $connection; // AMQPConnection instance
     private $connection_details; // array of strings required to connect
@@ -45,8 +48,10 @@ class AsyncResult
      * Connect to queue, see if there's a result waiting for us
      * Private - to be used internally
      */
-    private function getCompleteResult()
+    private function fetchCurrentResult()
     {
+        // If task's state is one of the unready states, fetch the result
+        // again. Otherwise return the most recent state.
         if ($this->complete_result) {
             return $this->complete_result;
         }
@@ -58,14 +63,26 @@ class AsyncResult
             $this->remove_from_queue
         );
 
-        if ($message !== false) {
-            $this->complete_result = $message['complete_result'];
-            $this->body = json_decode(
-                $message['body']
-            );
+        if (!$message) {
+            return false;
         }
 
-        return false;
+        if (
+            !in_array(
+                $message['complete_result']['status'],
+                self::UNREADY_STATES,
+                true
+            )
+        ) {
+            $this->complete_result = $message['complete_result'];
+        }
+
+        $this->body = json_decode(
+            $message['body']
+        );
+
+        return $message['complete_result'];
+
     }
 
     /**
@@ -92,7 +109,9 @@ class AsyncResult
      */
     public function isReady()
     {
-        return ($this->getCompleteResult() !== false);
+        $this->fetchCurrentResult();
+        return !empty($this->body->status)
+            && in_array($this->body->status, self::READY_STATES, true);
     }
 
     /**
@@ -101,8 +120,9 @@ class AsyncResult
      */
     public function getStatus()
     {
+        $this->fetchCurrentResult();
         if (!$this->body) {
-            throw new CeleryException('Called getStatus before task was ready');
+            return 'PENDING';
         }
         return $this->body->status;
     }
@@ -230,11 +250,7 @@ class AsyncResult
          * status: Deprecated alias of state.
          */
         elseif ($property == 'state' || $property == 'status') {
-            if ($this->isReady()) {
-                return $this->getStatus();
-            } else {
-                return 'PENDING';
-            }
+            return $this->getStatus();
         }
 
         return $this->$property;
